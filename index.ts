@@ -1,66 +1,69 @@
-import { initSdk } from './config'
-import { PublicKey } from '@solana/web3.js'
-import Decimal from 'decimal.js'
+import {initSdk} from './config'
+import {PublicKey} from '@solana/web3.js'
 
 async function watchTrades() {
   const raydium = await initSdk()
 
-  // SOL-RAY pool
-  const poolId = '4y81XN75NGct6iUYkBp2ixQKtXdrQxxMVgFbFF9w5n4u'
+  // SOL/USDT pool
+  const poolId = '3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF'
+  const poolAddress = new PublicKey(poolId)
 
-  const poolInfos = await raydium.cpmm.getRpcPoolInfos([poolId])
-  let lastBaseReserve = poolInfos[poolId].baseReserve
-  let lastQuoteReserve = poolInfos[poolId].quoteReserve
+  console.log(`\nStarting monitoring for SOL/USDT pool`)
 
-  console.log('Initial pool state:', {
-    price: poolInfos[poolId].poolPrice.toString(),
-    baseReserve: lastBaseReserve.toString(),
-    quoteReserve: lastQuoteReserve.toString()
-  })
+  const handleSwapEvent = (log: string) => {
+    try {
+      if (!log.includes('RouteSwap')) {
+        const amountInMatch = /amount_in:\s(\d+)/.exec(log)
+        const amountOutMatch = /amount_out:\s(\d+)/.exec(log)
 
-  const subscription = raydium.connection.onAccountChange(
-    new PublicKey(poolId),
-    async () => {
-      try {
-        const currentPoolInfo = await raydium.cpmm.getRpcPoolInfos([poolId])
-        const currentBaseReserve = currentPoolInfo[poolId].baseReserve
-        const currentQuoteReserve = currentPoolInfo[poolId].quoteReserve
+        if (amountInMatch && amountOutMatch) {
+          const amountIn = parseFloat(amountInMatch[1])
+          const amountOut = parseFloat(amountOutMatch[1])
 
-        const baseChange = currentBaseReserve.sub(lastBaseReserve)
-        const quoteChange = currentQuoteReserve.sub(lastQuoteReserve)
+          const isSell = amountIn > amountOut
 
-        if (!baseChange.isZero() || !quoteChange.isZero()) {
-          const isSell = baseChange.isNeg() && quoteChange.isPos()
+          const amountSOL = isSell
+            ? amountIn / Math.pow(10, 9)    // SOL amount_in
+            : amountOut / Math.pow(10, 9)   // SOL amount_out
 
-          const price = new Decimal(quoteChange.abs().toString())
-            .div(baseChange.abs().toString())
+          const amountUSDT = isSell
+            ? amountOut / Math.pow(10, 6)   // USDT amount_out
+            : amountIn / Math.pow(10, 6)    // USDT amount_in
 
-          console.log('\n🔄 Trade Detected:', {
-            timestamp: new Date().toLocaleTimeString(),
-            type: isSell ? '🔴 SELL' : '🟢 BUY',
-            baseAmount: baseChange.abs().toString(),
-            quoteAmount: quoteChange.abs().toString(),
-            price: price.toString(),
-            currentPrice: currentPoolInfo[poolId].poolPrice.toString()
-          })
+          const price = amountUSDT / amountSOL
+
+          if (price > 180 && price < 260) {
+            console.log('\n🔄 Swap:', {
+              type: isSell ? '🔴 SELL' : '🟢 BUY',
+              SOL: amountSOL.toFixed(4),
+              USDT: amountUSDT.toFixed(2),
+              price: price.toFixed(2)
+            })
+          }
         }
-
-        lastBaseReserve = currentBaseReserve
-        lastQuoteReserve = currentQuoteReserve
-
-      } catch (error) {
-        console.error('Error processing update:', error)
       }
+    } catch (error) {
+      console.error('Error:', error)
+    }
+  }
+
+  const subscription = raydium.connection.onLogs(
+    poolAddress,
+    (logs) => {
+      logs.logs.forEach((log) => {
+        if (log.includes('Swap')) {
+          handleSwapEvent(log)
+        }
+      })
     },
     'confirmed'
   )
 
   process.on('SIGINT', () => {
     console.log('\nUnsubscribing from WebSocket...')
-    raydium.connection.removeAccountChangeListener(subscription)
+    raydium.connection.removeOnLogsListener(subscription)
     process.exit(0)
   })
 }
 
-console.log('Starting trade monitoring...')
 watchTrades()
